@@ -12,7 +12,7 @@ Defining a model for DDPM:
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
+import math
 
 class Block(nn.Module):
 
@@ -44,5 +44,73 @@ class Block(nn.Module):
         h = self.pool(h)
         # Transform
         h = self.transform(h)
+
         return h
+    
+class PositionalEmbedding(nn.Module):
+    def __init__(self, channels):
+        super(PositionalEmbedding, self).__init__()
+        self.channels = channels
+
+    def forward(self, t):
+        device = t.device
+        half_dim = self.channels // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, dtype=torch.float32, device=device) * -emb)
+        emb = t[:, None] * emb[None, :]
+        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+        return emb
+
+class SimpleUnet(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        img_channels = 3
+        time_embed_dim = 32
+        out_dim = 3
+        down_channels = (32, 64, 128, 256, 512)
+        up_channels = (512, 256, 128, 64, 32)  
+
+        self.time_mlp = nn.Sequential(
+            PositionalEmbedding(channels=time_embed_dim),
+            nn.Linear(time_embed_dim, time_embed_dim),
+            nn.ReLU()
+        )
+
+        self.conv1 = nn.Conv2d(img_channels, down_channels[0], 3, padding=1)
+
+        # Down sample
+        self.downs = nn.ModuleList([
+            Block(down_channels[i], down_channels[i+1], time_embed_dim)
+            for i in range(len(down_channels)-1)
         
+        ])  
+
+        # Up sample
+        self.up = nn.ModuleList([
+            Block(up_channels[i], up_channels[i+1], time_embed_dim, up=True)
+            for i in range(len(up_channels)-1)
+        ])
+
+        self.output = nn.Conv2d(up_channels[-1], out_dim, 1)
+
+    def forward(self, x, t):
+        # Embedd time
+        t = self.time_mlp(t)
+        # Initial conv
+        x = self.conv0(x)
+        # Unet
+        residual_inputs = []
+        for down in self.downs:
+            x = down(x, t)
+            residual_inputs.append(x)
+        for up in self.ups:
+            residual_x = residual_inputs.pop()
+            # Add residual x as additional channels
+            x = torch.cat((x, residual_x), dim=1)           
+            x = up(x, t)
+        return self.output(x)
+    
+model = SimpleUnet()
+print("Num params: ", sum(p.numel() for p in model.parameters()))
+print(model)
